@@ -3,12 +3,19 @@
   "name": "FusionSolar Charging Sessions",
   "codeowners": [],
   "config_flow": true,
-  "dependencies": ["http", "frontend", "panel_custom"],
+  "dependencies": [
+    "http",
+    "frontend",
+    "panel_custom"
+  ],
   "documentation": "https://github.com/YOUR_USER/ha-fusionsolar-charging",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/YOUR_USER/ha-fusionsolar-charging/issues",
-  "requirements": ["fusion_solar_py==0.1.2"],
+  "requirements": [
+    "fusion_solar_py==0.1.2",
+    "openpyxl==3.1.5"
+  ],
   "single_config_entry": true,
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

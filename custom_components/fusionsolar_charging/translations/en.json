@@ -8,17 +8,27 @@
           "username": "Username",
           "password": "Password",
           "subdomain": "Portal subdomain",
-          "dn_id": "Charger ID (dnId)",
-          "rate": "Default rate for refunds (EUR/kWh)"
+          "dn_id": "Charger ID (dnId)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "FusionSolar login needs attention",
+        "description": "FusionSolar rejected the saved login. Enter your current username and password. Saved sessions stay available meanwhile.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
         }
       }
     },
     "error": {
-      "invalid_auth": "Login failed. Check username, password and subdomain (a captcha may be required).",
+      "invalid_auth": "Login failed. Check username, password and subdomain.",
+      "captcha": "FusionSolar asks for a captcha. Log in once in a browser, then try again later.",
       "cannot_connect": "Could not connect to FusionSolar."
     },
     "abort": {
-      "single_instance_allowed": "Only one charger can be configured."
+      "single_instance_allowed": "Only one charger can be configured.",
+      "already_configured": "This charger is already configured.",
+      "reauth_successful": "Login updated."
     }
   }
 }

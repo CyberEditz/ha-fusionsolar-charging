@@ -21,7 +21,7 @@ th{font-size:13px;color:var(--secondary-text-color);font-weight:600}.n{text-alig
 tr.u{cursor:pointer}tr.u:hover{background:var(--secondary-background-color)}
 .big{font-size:26px;font-weight:700}.tot{display:flex;gap:28px;margin-bottom:10px}
 #err{color:var(--error-color,#c0392b);margin-top:10px}.scroll{max-height:380px;overflow:auto}
-#dash{display:none}.leg{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:13px}
+#dash{display:none}.warn{border-left:4px solid var(--warning-color,#e8a200);padding:8px 12px;margin-bottom:12px;background:var(--card-background-color)}.warn:empty{display:none}.nm{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-bottom:10px}.leg{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:13px}
 .leg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
 svg{width:100%;height:auto}svg text{fill:var(--secondary-text-color);font-size:11px}
 </style>
@@ -41,7 +41,9 @@ svg{width:100%;height:auto}svg text{fill:var(--secondary-text-color);font-size:1
   <div id="err" role="alert"></div>
 </section>
 <div id="dash">
-  <div class="row sb" style="margin-bottom:12px"><span class="mut" id="per"></span><button id="change">Change period</button></div>
+  <div class="row sb" style="margin-bottom:12px"><span class="mut"><span id="per"></span> · <span id="upd"></span></span>
+    <div class="row"><button id="refresh">Refresh</button><button id="change">Change period</button></div></div>
+  <div class="warn" id="warn" role="alert"></div>
   <section class="card"><h2>Usage per user</h2>
     <div class="tot"><div><div class="big" id="tkwh"></div><span class="mut">kWh charged</span></div>
     <div><div class="big" id="tses"></div><span class="mut">sessions</span></div></div>
@@ -53,10 +55,14 @@ svg{width:100%;height:auto}svg text{fill:var(--secondary-text-color);font-size:1
   </section>
   <section class="card">
     <div class="row sb" style="margin-bottom:8px"><h2 style="margin:0">Sessions</h2>
-      <div class="row"><label>Rate (EUR/kWh)<input id="rate" size="6" inputmode="decimal" placeholder="optional"></label>
-      <button class="p" id="csv">Export CSV</button></div></div>
+      <div class="row"><button class="p" id="csv">Export CSV</button><button class="p" id="xlsx">Export Excel</button></div></div>
     <p class="mut" style="margin:0 0 8px" id="exinfo"></p>
     <div class="scroll"><table><thead><tr><th>Day</th><th>Start</th><th>End</th><th>User</th><th class="n">kWh</th></tr></thead><tbody id="rows"></tbody></table></div>
+  </section>
+  <section class="card"><h2>Names</h2>
+    <p class="mut" style="margin-top:0">Show a real name instead of the account ID, on this page and in exports.</p>
+    <div class="nm" id="names"></div>
+    <div class="row"><button id="savenames">Save names</button><span class="mut" id="nmsg"></span></div>
   </section>
 </div></main>`;
 
@@ -77,12 +83,19 @@ class FusionSolarChargingPanel extends HTMLElement {
     $("#load").onclick = () => this.load();
     $("#change").onclick = () => { $("#dash").style.display = "none"; $("#pick").style.display = ""; };
     $("#usel").onchange = () => { this.draw(); this.list(); };
-    $("#csv").onclick = () => this.exportCsv();
+    $("#csv").onclick = () => this.exportFile("csv");
+    $("#xlsx").onclick = () => this.exportFile("xlsx");
+    $("#refresh").onclick = () => this.load(true);
+    $("#savenames").onclick = () => this.saveNames();
+    this.names = {};
   }
   set hass(h) { this._h = h; this.$("ha-menu-button").hass = h; }
   set narrow(v) { this.$("ha-menu-button").narrow = v; }
 
-  async load() {
+  nm(u) { return this.names[u] || u; }
+  err(e) { return e.body?.message || e.message || JSON.stringify(e); }
+
+  async load(refresh = false) {
     const $ = this.$;
     this.range = { start: $("#from").value, end: $("#to").value };
     $("#err").textContent = "";
@@ -91,18 +104,20 @@ class FusionSolarChargingPanel extends HTMLElement {
     }
     $("#load").disabled = true; $("#load").textContent = "Loading…";
     try {
-      const d = await this._h.callApi("GET", `fusionsolar_charging/sessions?start=${this.range.start}&end=${this.range.end}`);
-      this.rows = d.sessions;
-      if (d.rate && !$("#rate").value) $("#rate").value = d.rate;
+      const d = await this._h.callApi("GET", `fusionsolar_charging/sessions?start=${this.range.start}&end=${this.range.end}${refresh ? "&refresh=1" : ""}`);
+      this.rows = d.sessions; this.names = d.names || {};
+      $("#upd").textContent = d.updated ? "Updated " + new Date(d.updated).toLocaleString() : "";
       this.show();
+      $("#warn").textContent = d.warning ? "Showing saved data. " + d.warning : "";
     } catch (e) {
-      $("#err").textContent = "Could not load sessions: " + (e.body?.message || e.message || JSON.stringify(e));
+      const msg = "Could not load sessions: " + this.err(e);
+      if ($("#dash").style.display === "block") $("#warn").textContent = msg; else $("#err").textContent = msg;
     }
     $("#load").disabled = false; $("#load").textContent = "Show sessions";
   }
 
   show() {
-    const $ = this.$, rows = this.rows;
+    const $ = this.$, rows = this.rows, prev = $("#usel").value;
     $("#pick").style.display = "none"; $("#dash").style.display = "block";
     $("#per").textContent = `${this.range.start} to ${this.range.end}`;
     const agg = {}; rows.forEach(r => { const a = agg[r.user] ||= { n: 0, k: 0 }; a.n++; a.k += r.kwh; });
@@ -110,10 +125,12 @@ class FusionSolarChargingPanel extends HTMLElement {
     const tk = rows.reduce((s, r) => s + r.kwh, 0);
     $("#tkwh").textContent = f1(tk); $("#tses").textContent = rows.length;
     $("#users").innerHTML = this.users.length ? this.users.map(u =>
-      `<tr class="u" data-u="${esc(u)}"><td>${esc(u)}</td><td class="n">${agg[u].n}</td><td class="n">${f1(agg[u].k)}</td><td><div class="bar" style="width:${tk ? agg[u].k / tk * 100 : 0}%"></div></td></tr>`).join("")
+      `<tr class="u" data-u="${esc(u)}"><td>${esc(this.nm(u))}</td><td class="n">${agg[u].n}</td><td class="n">${f1(agg[u].k)}</td><td><div class="bar" style="width:${tk ? agg[u].k / tk * 100 : 0}%"></div></td></tr>`).join("")
       : '<tr><td colspan="4" class="mut">No sessions in this period.</td></tr>';
     this.shadowRoot.querySelectorAll("tr.u").forEach(t => t.onclick = () => { $("#usel").value = t.dataset.u; $("#usel").onchange(); });
-    $("#usel").innerHTML = '<option value="">All users</option>' + this.users.map(u => `<option>${esc(u)}</option>`).join("");
+    $("#usel").innerHTML = '<option value="">All users</option>' + this.users.map(u => `<option value="${esc(u)}">${esc(this.nm(u))}</option>`).join("");
+    if (this.users.includes(prev)) $("#usel").value = prev;
+    $("#names").innerHTML = this.users.map(u => `<label>${esc(u)}<input data-u="${esc(u)}" value="${esc(this.names[u] || "")}" placeholder="Name"></label>`).join("");
     this.draw(); this.list();
   }
 
@@ -141,32 +158,43 @@ class FusionSolarChargingPanel extends HTMLElement {
       us.forEach(u => {
         const v = val(u, d); if (!v) return;
         const h = v / max * ph, y = T + ph - base - h; base += h;
-        g += `<rect x="${L + i * bw + bw * .1}" y="${y}" width="${bw * .8}" height="${h}" fill="${COL[this.users.indexOf(u) % COL.length]}"><title>${d} ${esc(u)}: ${v.toFixed(2)} kWh</title></rect>`;
+        g += `<rect x="${L + i * bw + bw * .1}" y="${y}" width="${bw * .8}" height="${h}" fill="${COL[this.users.indexOf(u) % COL.length]}"><title>${d} ${esc(this.nm(u))}: ${v.toFixed(2)} kWh</title></rect>`;
       });
       if (i % Math.ceil(ds.length / 12) === 0) g += `<text x="${L + i * bw + bw / 2}" y="${H - 6}" text-anchor="middle">${d.slice(5)}</text>`;
     });
     $("#chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="kWh per day">${g}</svg>`;
-    $("#leg").innerHTML = us.map(u => `<span><i style="background:${COL[this.users.indexOf(u) % COL.length]}"></i>${esc(u)}</span>`).join("");
+    $("#leg").innerHTML = us.map(u => `<span><i style="background:${COL[this.users.indexOf(u) % COL.length]}"></i>${esc(this.nm(u))}</span>`).join("");
   }
 
   list() {
     const $ = this.$, sel = $("#usel").value, v = this.rows.filter(r => !sel || r.user === sel);
-    $("#rows").innerHTML = v.map(r => `<tr><td>${r.day}</td><td>${r.start}</td><td>${r.end}</td><td>${esc(r.user)}</td><td class="n">${r.kwh.toFixed(2)}</td></tr>`).join("");
-    $("#exinfo").textContent = `CSV export covers: ${sel || "all users"} (${v.length} sessions).`;
+    $("#rows").innerHTML = v.map(r => `<tr><td>${r.day}</td><td>${r.start}</td><td>${r.end}</td><td>${esc(r.name)}</td><td class="n">${r.kwh.toFixed(2)}</td></tr>`).join("");
+    $("#exinfo").textContent = `Export covers: ${sel ? this.nm(sel) : "all users"} (${v.length} sessions).`;
   }
 
-  async exportCsv() {
+  async exportFile(fmt) {
     const $ = this.$, sel = $("#usel").value;
-    const p = new URLSearchParams({ start: this.range.start, end: this.range.end, rate: $("#rate").value });
+    const p = new URLSearchParams({ start: this.range.start, end: this.range.end, format: fmt });
     if (sel) p.set("user", sel);
     try {
       const r = await this._h.fetchWithAuth(`/api/fusionsolar_charging/export?${p}`);
-      if (!r.ok) throw new Error(r.status);
+      if (!r.ok) { let m = r.status; try { m = (await r.json()).message; } catch (_) {} throw new Error(m); }
       const a = document.createElement("a");
       a.href = URL.createObjectURL(await r.blob());
-      a.download = `charging_${this.range.start}_${this.range.end}${sel ? "_" + sel.replace(/\W/g, "") : ""}.csv`;
+      a.download = `charging_${this.range.start}_${this.range.end}${sel ? "_" + sel.replace(/\W/g, "") : ""}.${fmt}`;
       a.click(); URL.revokeObjectURL(a.href);
     } catch (e) { $("#exinfo").textContent = "Export failed: " + e.message; }
+  }
+
+  async saveNames() {
+    const $ = this.$, names = {};
+    this.shadowRoot.querySelectorAll("#names input").forEach(i => names[i.dataset.u] = i.value);
+    try {
+      const d = await this._h.callApi("POST", "fusionsolar_charging/names", { names });
+      this.names = d.names;
+      this.rows = this.rows.map(r => ({ ...r, name: this.nm(r.user) }));
+      this.show(); $("#nmsg").textContent = "Saved.";
+    } catch (e) { $("#nmsg").textContent = "Could not save: " + this.err(e); }
   }
 }
 customElements.define("fusionsolar-charging-panel", FusionSolarChargingPanel);
