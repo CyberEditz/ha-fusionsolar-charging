@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "FusionSolar charger",
+        "description": "Use your owner login for the FusionSolar web portal. The subdomain is the first part of your portal address (e.g. uni004eu5 in uni004eu5.fusionsolar.huawei.com). The charger ID is the dnId from the charge record request.",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "subdomain": "Portal subdomain",
+          "dn_id": "Charger ID (dnId)",
+          "rate": "Default rate for refunds (EUR/kWh)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Login failed. Check username, password and subdomain (a captcha may be required).",
+      "cannot_connect": "Could not connect to FusionSolar."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one charger can be configured."
+    }
+  }
+}
