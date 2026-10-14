@@ -17,5 +17,9 @@
     "openpyxl==3.1.5"
   ],
   "single_config_entry": true,
-  "version": "0.2.0"
+  "version": "0.3.0",
+  "after_dependencies": [
+    "recorder",
+    "homewizard"
+  ]
 }

@@ -1,4 +1,4 @@
-"""FusionSolar charge-record client with month cache, name mapping and exports."""
+"""FusionSolar charge-record client: month cache, nicknames, per-session overrides, exports."""
 from __future__ import annotations
 
 import asyncio
@@ -75,14 +75,15 @@ class Api:
         self.client = None
         self.lock = threading.Lock()
         self.alock = asyncio.Lock()
-        self.data = {"months": {}, "names": {}}
+        # names: account ID -> nickname; overrides: session ID -> nickname
+        self.data = {"months": {}, "names": {}, "overrides": {}}
         self.blocked = None  # (LoginError, until or None)
 
     async def async_load(self):
         saved = await self.store.async_load()
         if saved:
-            self.data["months"] = saved.get("months", {})
-            self.data["names"] = saved.get("names", {})
+            for k in self.data:
+                self.data[k] = saved.get(k, {})
 
     # ---- blocking part (executor) ----
     def _epoch(self, day: date, end=False) -> int:
@@ -126,7 +127,9 @@ class Api:
     def _session(self, r) -> dict:
         s = datetime.fromtimestamp(int(r["startTime"]), self.tz)
         e = datetime.fromtimestamp(int(r["stopTime"]), self.tz)
-        return {"id": r.get("orderNumber"), "day": s.strftime("%Y-%m-%d"),
+        return {"id": r.get("orderNumber") or r.get("serialNumber")
+                or str(r["startTime"]),
+                "day": s.strftime("%Y-%m-%d"),
                 "start": s.strftime("%H:%M"), "end": e.strftime("%H:%M"),
                 "endDay": e.strftime("%Y-%m-%d"),
                 "user": r.get("accountId") or "unknown",
@@ -166,6 +169,8 @@ class Api:
     async def async_sessions(self, start: str, end: str, refresh=False):
         s, e = date.fromisoformat(start), date.fromisoformat(end)
         months = _months(s, e)
+        fresh: set[str] = set()
+        warning = None
         async with self.alock:
             now = datetime.now(self.tz)
             need = []
@@ -177,30 +182,54 @@ class Api:
                         now - datetime.fromisoformat(c["fetched"])
                 ).total_seconds() > TTL:
                     need.append(m)
-            warning = None
             if need:
                 try:
                     await self._refresh_months(need, now)
+                    fresh = set(need)
                 except LoginError as le:
                     if any(m not in self.data["months"] for m in months):
                         raise
                     warning = le.message  # serve saved data instead
-        names = self.data["names"]
+        names, ov = self.data["names"], self.data["overrides"]
+        disp: dict[str, str] = {}  # same nickname (any case) -> one spelling
+
+        def label(x) -> str:
+            v = (ov.get(x["id"]) or names.get(x["user"]) or x["user"]).strip()
+            v = v or x["user"]
+            return disp.setdefault(v.casefold(), v)
+
         out = []
         for m in months:
-            for x in (self.data["months"].get(m) or {}).get("sessions", []):
+            c = self.data["months"].get(m) or {}
+            for x in c.get("sessions", []):
                 if start <= x["day"] <= end:
-                    out.append(dict(x, name=names.get(x["user"]) or x["user"]))
+                    out.append(dict(
+                        x, name=label(x), renamed=x["id"] in ov,
+                        source="live" if m in fresh else "cache",
+                        fetched=c.get("fetched"),
+                        final=bool(c.get("complete"))))
         out.sort(key=lambda x: (x["day"], x["start"]))
         fetched = [self.data["months"][m]["fetched"] for m in months
                    if m in self.data["months"]]
         return {"sessions": out, "names": dict(names),
                 "updated": max(fetched) if fetched else None,
+                "source": "live" if fresh else "cache", "ttl": TTL,
                 "warning": warning}
+
+    # ---- nicknames ----
+    def _canon(self, value) -> str:
+        """Clean a nickname; reuse an existing spelling so 'jan' == 'Jan'."""
+        v = " ".join(str(value or "").split())
+        if not v:
+            return ""
+        for e in [*self.data["names"].values(), *self.data["overrides"].values()]:
+            if e.casefold() == v.casefold():
+                return e
+        return v
 
     async def async_set_names(self, names: dict) -> dict:
         for k, v in names.items():
-            k, v = str(k).strip(), str(v or "").strip()
+            k, v = str(k).strip(), self._canon(v)
             if v:
                 self.data["names"][k] = v
             else:
@@ -208,16 +237,35 @@ class Api:
         await self.store.async_save(self.data)
         return dict(self.data["names"])
 
+    async def async_set_override(self, session_id: str, name: str) -> str:
+        name = self._canon(name)
+        if name:
+            self.data["overrides"][str(session_id)] = name
+        else:
+            self.data["overrides"].pop(str(session_id), None)
+        await self.store.async_save(self.data)
+        return name
+
 
 # ---- exports ----
+def filter_rows(rows, users):
+    """Keep rows whose (merged) user name is in users; no users = keep all."""
+    if not users:
+        return rows
+    want = {u.casefold() for u in users}
+    return [r for r in rows if r["name"].casefold() in want]
+
+
 def summarize(rows):
+    """Per merged user: (name, account IDs, sessions, kWh), biggest first."""
     agg = {}
     for r in rows:
-        a = agg.setdefault(r["user"], [r["name"], 0, 0.0])
+        a = agg.setdefault(r["name"], [set(), 0, 0.0])
+        a[0].add(r["user"])
         a[1] += 1
         a[2] += r["kwh"]
-    return sorted(((n, u, c, k) for u, (n, c, k) in agg.items()),
-                  key=lambda x: -x[3])
+    return sorted(((n, ", ".join(sorted(a[0])), a[1], a[2])
+                   for n, a in agg.items()), key=lambda x: -x[3])
 
 
 def _n(x):
@@ -236,10 +284,10 @@ def make_csv(rows) -> bytes:
                 _n(sum(r["kwh"] for r in rows)), f"{len(rows)} sessions"])
     w.writerow([])
     w.writerow(["Totals per user"])
-    w.writerow(["User", "Account ID", "Sessions", "kWh"])
+    w.writerow(["User", "Account ID(s)", "Sessions", "kWh"])
     for n, u, c, k in summarize(rows):
         w.writerow([n, u, c, _n(k)])
-    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+    return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
 def make_xlsx(rows, period: str) -> bytes:
@@ -270,7 +318,7 @@ def make_xlsx(rows, period: str) -> bytes:
 
     s2 = wb.create_sheet("Per user")
     s2.append([f"Period {period}"])
-    s2.append(["User", "Account ID", "Sessions", "kWh"])
+    s2.append(["User", "Account ID(s)", "Sessions", "kWh"])
     summ = summarize(rows)
     for item in summ:
         s2.append(list(item))
@@ -282,7 +330,7 @@ def make_xlsx(rows, period: str) -> bytes:
     for c in s2[2] + s2[last + 1]:
         c.font = Font(bold=True)
     s2["A1"].font = Font(bold=True)
-    for col, wd in zip("ABCD", (24, 16, 10, 10)):
+    for col, wd in zip("ABCD", (24, 22, 10, 10)):
         s2.column_dimensions[col].width = wd
     buf = io.BytesIO()
     wb.save(buf)
